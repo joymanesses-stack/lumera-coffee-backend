@@ -1,0 +1,13 @@
+
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Environment variables and credentials
+.env
+.env.*
+!.env.example
+server/private
+server/private/
+*service-account*.json
+*firebase-adminsdk*.json

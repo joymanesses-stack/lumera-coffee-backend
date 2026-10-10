@@ -1,0 +1,13 @@
+.env
+src/.env
+private/
+*service-account*.json
+*firebase-admin*.json
+
+@"
+node_modules/
+*/node_modules/
+.env
+.env.
+!.env.example
+"@ | Add-Content .gitignore

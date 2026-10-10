@@ -1,0 +1,11 @@
+{
+  "name": "lumera-backend-workspace",
+  "private": true,
+  "workspaces": [
+    "server"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace=lumera-call-center-api",
+    "start": "npm run start --workspace=lumera-call-center-api"
+  }
+}
