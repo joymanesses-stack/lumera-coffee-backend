@@ -23,6 +23,15 @@ function deletedMessageArchiveId(conversationId, messageId) {
   return crypto.createHash('sha256').update(`${conversationId}\0${messageId}`).digest('hex');
 }
 
+async function findDeletedMessageArchive(id) {
+  // Older clients send the original message UUID, while newer clients may send
+  // the archive document ID returned by GET /bin. Accept both forms.
+  const byArchiveId = await deletedMessages.doc(id).get();
+  if (byArchiveId.exists) return byArchiveId;
+  const byMessageId = await deletedMessages.where('messageId', '==', id).limit(1).get();
+  return byMessageId.empty ? null : byMessageId.docs[0];
+}
+
 function publicMessage(doc) {
   const value = doc.data();
   return { id: doc.id, ...value, text: value.deletedAt ? 'This message was deleted.' : value.text,
@@ -117,9 +126,9 @@ module.exports = (io) => {
   }));
 
   router.post('/bin/messages/:messageId/restore', authMiddleware, requireRole('agent', 'admin'), asyncRoute(async (request, response) => {
-    const archiveRef = deletedMessages.doc(request.params.messageId);
-    const archive = await archiveRef.get();
-    if (!archive.exists) throw httpError(404, 'Deleted message not found in Bin.');
+    const archive = await findDeletedMessageArchive(request.params.messageId);
+    if (!archive) throw httpError(404, 'Deleted message not found in Bin.');
+    const archiveRef = archive.ref;
     const data = archive.data();
     const { ref: conversationRef, value } = await readConversation(data.conversationId);
     if (!canManageDeletedMessage(value, request.user, data)) throw httpError(403, 'You cannot manage this deleted message.');
@@ -140,9 +149,9 @@ module.exports = (io) => {
   }));
 
   router.delete('/bin/messages/:messageId', authMiddleware, requireRole('agent', 'admin'), asyncRoute(async (request, response) => {
-    const archiveRef = deletedMessages.doc(request.params.messageId);
-    const archive = await archiveRef.get();
-    if (!archive.exists) throw httpError(404, 'Deleted message not found in Bin.');
+    const archive = await findDeletedMessageArchive(request.params.messageId);
+    if (!archive) throw httpError(404, 'Deleted message not found in Bin.');
+    const archiveRef = archive.ref;
     const data = archive.data();
     const { ref: conversationRef, value } = await readConversation(data.conversationId);
     if (!canManageDeletedMessage(value, request.user, data)) throw httpError(403, 'You cannot manage this deleted message.');
