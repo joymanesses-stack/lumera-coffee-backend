@@ -10,7 +10,13 @@ const config = {
   port: Number(process.env.PORT || 3001),
   jwtSecret: process.env.JWT_SECRET || '',
   jwtTtl: Math.min(Math.max(Number(process.env.JWT_TTL_SECONDS || 86400), 300), 604800),
-  origins: (process.env.ALLOWED_ORIGINS || '').split(',').map((value) => value.trim()).filter(Boolean),
+  // Keep the deployed storefront origins allowed even when Render's
+  // ALLOWED_ORIGINS setting only contains local or staging URLs.
+  origins: [...new Set([
+    'https://lumera-coffee.com',
+    'https://www.lumera-coffee.com',
+    ...(process.env.ALLOWED_ORIGINS || '').split(',').map((value) => value.trim()).filter(Boolean),
+  ])],
   adminEmails: (process.env.ADMIN_EMAILS || process.env.BOOTSTRAP_ADMIN_EMAIL || '').split(',').map((value) => value.trim().toLowerCase()).filter(Boolean),
   stunUrls: (process.env.STUN_URLS || 'stun:stun.l.google.com:19302').split(',').map((value) => value.trim()).filter(Boolean),
   turnUrls: (process.env.TURN_URLS || '').split(',').map((value) => value.trim()).filter(Boolean),
