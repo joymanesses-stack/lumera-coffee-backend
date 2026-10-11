@@ -51,6 +51,20 @@ All routes below require an admin session:
 - `GET /v1/admin/calls` and `GET /v1/admin/conversations` provide operational views; `POST /v1/admin/calls/:callId/end` can end a call.
 - The admin dashboard reports user, agent, call, chat, and inquiry counts plus recent call and chat activity.
 
+## Agent Bin API
+
+Agents and administrators can move completed call-history records and inquiries to the Bin, restore them, or permanently delete them:
+
+- `GET /v1/agent/bin/calls` lists binned calls with caller name, email, and phone.
+- `DELETE /v1/agent/calls/:callId` moves a completed call to the Bin and sets `inBin`, `deletedAt`, and `deletedBy`.
+- `POST /v1/agent/bin/calls/:callId/restore` restores a call and clears its deletion fields; `DELETE /v1/agent/bin/calls/:callId` permanently deletes a binned call.
+- `DELETE /v1/calls/:callId` moves a completed (`missed`, `declined`, or `ended`) call into the Bin. Active calls cannot be deleted.
+- `GET /v1/calls/bin` lists binned calls; `POST /v1/calls/bin/:callId/restore` restores one; `DELETE /v1/calls/bin/:callId` permanently deletes one.
+- `DELETE /v1/inquiries/:inquiryId` moves an inquiry into the Bin.
+- `GET /v1/inquiries/bin` lists binned inquiries; `POST /v1/inquiries/bin/:inquiryId/restore` restores one; `DELETE /v1/inquiries/bin/:inquiryId` permanently deletes one.
+
+Deleting calls and inquiries is a soft delete until the permanent-delete endpoint is used. This backend stores call history and signaling metadata; it does not currently store audio or video recordings.
+
 For Firebase-backed staff, create `backendAdmins/{firebaseUid}` or `backendAgents/{firebaseUid}` through a trusted administrator process with `{ "active": true }`. The backend also recognizes the existing `agent/{uid}` and `agents/{uid}` memberships for compatibility. Never allow browser clients to write staff membership records.
 
 The current website still needs its login card and dashboards connected to these APIs. This workspace contains the backend only.

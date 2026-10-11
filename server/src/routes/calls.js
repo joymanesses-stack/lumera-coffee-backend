@@ -8,6 +8,7 @@ const { authMiddleware, requireRole } = require('../lib/security');
 
 const router = express.Router();
 const calls = db.collection('calls');
+const auditLogs = db.collection('auditLogs');
 
 async function addCallerDetails(call) {
   const caller = { name: call.callerName || call.callerEmail || 'Customer', email: call.callerEmail || null, phone: call.callerPhone || null };
@@ -22,6 +23,54 @@ async function addCallerDetails(call) {
 }
 
 module.exports = (io) => {
+  router.get('/bin', authMiddleware, requireRole('agent', 'admin'), asyncRoute(async (_request, response) => {
+    const snapshot = await calls.where('inBin', '==', true).get();
+    const docs = snapshot.docs.sort((left, right) => (right.data().deletedAt?.toMillis?.() || 0) - (left.data().deletedAt?.toMillis?.() || 0)).slice(0, 100);
+    const binnedCalls = await Promise.all(docs.map((item) => addCallerDetails({ id: item.id, ...item.data() })));
+    response.json({ calls: binnedCalls });
+  }));
+
+  router.post('/bin/:callId/restore', authMiddleware, requireRole('agent', 'admin'), asyncRoute(async (request, response) => {
+    const ref = calls.doc(request.params.callId);
+    const snapshot = await ref.get();
+    if (!snapshot.exists || (snapshot.data().inBin !== true && !snapshot.data().deletedAt)) throw httpError(404, 'Deleted call not found in Bin.');
+    const call = snapshot.data();
+    await ref.update({
+      deletedAt: FieldValue.delete(), deletedBy: FieldValue.delete(),
+      inBin: false, deletedPreviousStatus: FieldValue.delete(), restoredAt: FieldValue.serverTimestamp(), restoredBy: request.user.uid,
+    });
+    await auditLogs.add({ action: 'call.restore', callId: ref.id, actorUid: request.user.uid, createdAt: FieldValue.serverTimestamp() });
+    const { deletedAt, deletedBy, deletedPreviousStatus, ...restoredFields } = call;
+    const restored = { id: ref.id, ...restoredFields, status: deletedPreviousStatus || call.status, inBin: false, deletedAt: null };
+    io.to('agents').emit('call:updated', restored);
+    io.to('agents').emit('queue-updated');
+    response.json({ restored: true, call: restored });
+  }));
+
+  router.delete('/bin/:callId', authMiddleware, requireRole('agent', 'admin'), asyncRoute(async (request, response) => {
+    const ref = calls.doc(request.params.callId);
+    const snapshot = await ref.get();
+    if (!snapshot.exists || (snapshot.data().inBin !== true && !snapshot.data().deletedAt)) throw httpError(404, 'Deleted call not found in Bin.');
+    await ref.delete();
+    await auditLogs.add({ action: 'call.permanent_delete', callId: ref.id, actorUid: request.user.uid, createdAt: FieldValue.serverTimestamp() });
+    io.to('agents').emit('queue-updated');
+    response.json({ deleted: true, id: ref.id });
+  }));
+
+  router.delete('/:callId', authMiddleware, requireRole('agent', 'admin'), asyncRoute(async (request, response) => {
+    const ref = calls.doc(request.params.callId);
+    const snapshot = await ref.get();
+    if (!snapshot.exists) throw httpError(404, 'Call not found.');
+    const call = snapshot.data();
+    if (call.inBin === true || call.deletedAt) return response.json({ deleted: true, id: ref.id, alreadyInBin: true });
+    if (!['missed', 'declined', 'ended'].includes(call.status)) throw httpError(409, 'Only completed calls can be moved to Bin.');
+    await ref.update({ inBin: true, deletedAt: FieldValue.serverTimestamp(), deletedBy: request.user.uid, deletedPreviousStatus: call.status });
+    await auditLogs.add({ action: 'call.soft_delete', callId: ref.id, actorUid: request.user.uid, createdAt: FieldValue.serverTimestamp() });
+    io.to('agents').emit('call:deleted', { id: ref.id });
+    io.to('agents').emit('queue-updated');
+    response.json({ deleted: true, id: ref.id });
+  }));
+
   router.post('/', authMiddleware, requireRole('customer'), asyncRoute(async (request, response) => {
     const mode = request.body?.mode;
     if (!['voice', 'video'].includes(mode)) throw httpError(400, 'Call mode must be voice or video.');
@@ -50,12 +99,12 @@ module.exports = (io) => {
       if (status) query = calls.where('agentUid', '==', request.user.uid).where('status', '==', status).orderBy('createdAt', 'desc');
     }
     const snapshot = await query.limit(limit).get();
-    response.json({ calls: snapshot.docs.map((item) => ({ id: item.id, ...item.data() })) });
+    response.json({ calls: snapshot.docs.filter((item) => item.data().inBin !== true && !item.data().deletedAt).map((item) => ({ id: item.id, ...item.data() })) });
   }));
 
   router.get('/:callId', authMiddleware, asyncRoute(async (request, response) => {
     const snapshot = await calls.doc(request.params.callId).get();
-    if (!snapshot.exists) throw httpError(404, 'Call not found.');
+    if (!snapshot.exists || snapshot.data().inBin === true || snapshot.data().deletedAt) throw httpError(404, 'Call not found.');
     const call = snapshot.data();
     if (request.user.role === 'customer' && call.callerUid !== request.user.uid) throw httpError(403, 'You cannot access this call.');
     if (request.user.role === 'agent' && call.agentUid !== request.user.uid && !['ringing', 'missed', 'declined', 'ended'].includes(call.status)) throw httpError(403, 'You cannot access this call.');
@@ -82,7 +131,7 @@ module.exports = (io) => {
       const ref = calls.doc(request.params.callId);
       const value = await db.runTransaction(async (transaction) => {
         const snapshot = await transaction.get(ref);
-        if (!snapshot.exists) throw httpError(404, 'Call not found.');
+        if (!snapshot.exists || snapshot.data().inBin === true || snapshot.data().deletedAt) throw httpError(404, 'Call not found.');
         const call = snapshot.data();
         if (action === 'decline' && (request.user.role !== 'agent' || call.status !== 'ringing')) throw httpError(409, 'Only an agent can decline a ringing call.');
         const participant = request.user.role === 'customer'

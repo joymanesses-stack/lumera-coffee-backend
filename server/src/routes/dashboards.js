@@ -54,7 +54,7 @@ router.get('/user', authMiddleware, requireRole('customer'), asyncRoute(async (r
     calls.where('callerUid', '==', request.user.uid).orderBy('createdAt', 'desc').limit(20).get(),
     conversations.where('customerUid', '==', request.user.uid).orderBy('createdAt', 'desc').limit(20).get(),
   ]);
-  response.json({ user: request.user, calls: items(callList), conversations: items(conversationList).filter((conversation) => !conversation.deletedAt) });
+  response.json({ user: request.user, calls: items({ docs: callList.docs.filter((doc) => doc.data().inBin !== true && !doc.data().deletedAt) }), conversations: items(conversationList).filter((conversation) => !conversation.deletedAt) });
 }));
 
 const agentDashboard = asyncRoute(async (_request, response) => {
@@ -64,9 +64,10 @@ const agentDashboard = asyncRoute(async (_request, response) => {
     conversations.where('status', '==', 'active').where('agentUid', '==', _request.user.uid).orderBy('createdAt', 'desc').limit(30).get(),
     inquiries.orderBy('createdAt', 'desc').limit(30).get(),
   ]);
-  const ringingCalls = { docs: recentCalls.docs.filter((doc) => doc.data().status === 'ringing') };
+  const visibleCalls = { docs: recentCalls.docs.filter((doc) => doc.data().inBin !== true && !doc.data().deletedAt) };
+  const ringingCalls = { docs: visibleCalls.docs.filter((doc) => doc.data().status === 'ringing') };
   const expiredIds = await expireUnansweredCalls(ringingCalls);
-  const allCalls = items(recentCalls).map((call) => expiredIds.has(call.id) ? { ...call, status: 'missed', missedAt: new Date().toISOString() } : call);
+  const allCalls = items(visibleCalls).map((call) => expiredIds.has(call.id) ? { ...call, status: 'missed', missedAt: new Date().toISOString() } : call);
   const callQueue = allCalls.filter((call) => call.status === 'ringing' && !expiredIds.has(call.id));
   const callHistory = await addCallerDetails(allCalls.filter((call) => ['missed', 'declined', 'ended'].includes(call.status)));
   const chats = [...items(waitingChats), ...items(activeChats)].sort((left, right) => (Date.parse(right.createdAt || '') || 0) - (Date.parse(left.createdAt || '') || 0)).slice(0, 30);
@@ -92,10 +93,10 @@ router.get('/admin', authMiddleware, requireRole('admin'), asyncRoute(async (_re
   ]);
   response.json({
     users: [...items(users), ...items(agents), ...items(admins)].map((user) => ({ ...user, uid: user.uid || user.id, displayName: user.displayName || user.email || '' })),
-    calls: items(allCalls),
-    inquiries: items(allInquiries),
+    calls: items({ docs: allCalls.docs.filter((doc) => doc.data().inBin !== true && !doc.data().deletedAt) }),
+    inquiries: items({ docs: allInquiries.docs.filter((doc) => !doc.data().deletedAt) }),
     metrics: { users: userCount.data().count, agents: agentCount.data().count, calls: callCount.data().count, ringingCalls: ringingCount.data().count, conversations: conversationCount.data().count, waitingChats: waitingChatCount.data().count, inquiries: inquiryCount.data().count },
-    recentCalls: items(recentCalls),
+    recentCalls: items({ docs: recentCalls.docs.filter((doc) => doc.data().inBin !== true && !doc.data().deletedAt) }),
     recentConversations: items(recentConversations),
   });
 }));
@@ -106,7 +107,7 @@ router.get('/', authMiddleware, asyncRoute(async (request, response) => {
       calls.where('callerUid', '==', request.user.uid).orderBy('createdAt', 'desc').limit(20).get(),
       conversations.where('customerUid', '==', request.user.uid).orderBy('createdAt', 'desc').limit(20).get(),
     ]);
-    return response.json({ user: request.user, calls: items(callList), conversations: items(conversationList).filter((conversation) => !conversation.deletedAt) });
+    return response.json({ user: request.user, calls: items({ docs: callList.docs.filter((doc) => doc.data().inBin !== true && !doc.data().deletedAt) }), conversations: items(conversationList).filter((conversation) => !conversation.deletedAt) });
   }
   if (request.user.role === 'agent') {
     const [callQueue, waitingChats, activeChats, inquiryList] = await Promise.all([
@@ -116,7 +117,7 @@ router.get('/', authMiddleware, asyncRoute(async (request, response) => {
       inquiries.orderBy('createdAt', 'desc').limit(30).get(),
     ]);
     const chats = [...items(waitingChats), ...items(activeChats)].sort((left, right) => (right.createdAt?.toMillis?.() || 0) - (left.createdAt?.toMillis?.() || 0)).slice(0, 30);
-    return response.json({ calls: items(callQueue), conversations: chats, inquiries: items(inquiryList) });
+    return response.json({ calls: items({ docs: callQueue.docs.filter((doc) => doc.data().inBin !== true && !doc.data().deletedAt) }), conversations: chats, inquiries: items(inquiryList).filter((inquiry) => !inquiry.deletedAt) });
   }
   const [userCount, agentCount, callCount, ringingCount, conversationCount, waitingChatCount, inquiryCount] = await Promise.all([
     db.collection('backendUsers').count().get(), db.collection('backendAgents').count().get(), calls.count().get(),

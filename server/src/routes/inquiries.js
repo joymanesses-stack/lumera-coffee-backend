@@ -10,6 +10,39 @@ const inquiries = db.collection('inquiries');
 const auditLogs = db.collection('auditLogs');
 
 module.exports = (io) => {
+  router.get('/bin', authMiddleware, requireRole('agent', 'admin'), asyncRoute(async (_request, response) => {
+    const snapshot = await inquiries.where('deletedAt', '!=', null).orderBy('deletedAt', 'desc').limit(100).get();
+    response.json({ inquiries: snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() })) });
+  }));
+
+  router.post('/bin/:inquiryId/restore', authMiddleware, requireRole('agent', 'admin'), asyncRoute(async (request, response) => {
+    const ref = inquiries.doc(request.params.inquiryId);
+    const snapshot = await ref.get();
+    if (!snapshot.exists || !snapshot.data().deletedAt) throw httpError(404, 'Deleted inquiry not found in Bin.');
+    const inquiry = snapshot.data();
+    const status = inquiry.deletedPreviousStatus || 'new';
+    await ref.update({
+      deletedAt: FieldValue.delete(), deletedBy: FieldValue.delete(), deletedPreviousStatus: FieldValue.delete(),
+      status, restoredAt: FieldValue.serverTimestamp(), restoredBy: request.user.uid,
+    });
+    await auditLogs.add({ action: 'inquiry.restore', inquiryId: ref.id, actorUid: request.user.uid, createdAt: FieldValue.serverTimestamp() });
+    const { deletedAt, deletedBy, deletedPreviousStatus, ...restoredFields } = inquiry;
+    const restored = { id: ref.id, ...restoredFields, status, deletedAt: null };
+    io.to('agents').emit('inquiry:updated', restored);
+    io.to('agents').emit('queue-updated');
+    response.json({ restored: true, inquiry: restored });
+  }));
+
+  router.delete('/bin/:inquiryId', authMiddleware, requireRole('agent', 'admin'), asyncRoute(async (request, response) => {
+    const ref = inquiries.doc(request.params.inquiryId);
+    const snapshot = await ref.get();
+    if (!snapshot.exists || !snapshot.data().deletedAt) throw httpError(404, 'Deleted inquiry not found in Bin.');
+    await ref.delete();
+    await auditLogs.add({ action: 'inquiry.permanent_delete', inquiryId: ref.id, actorUid: request.user.uid, createdAt: FieldValue.serverTimestamp() });
+    io.to('agents').emit('queue-updated');
+    response.json({ deleted: true, id: ref.id });
+  }));
+
   router.post('/', asyncRoute(async (request, response) => {
     const data = request.body || {};
     const contactName = typeof data.contactName === 'string' ? data.contactName.trim() : '';
@@ -37,6 +70,7 @@ module.exports = (io) => {
     const ref = inquiries.doc(request.params.inquiryId);
     const snapshot = await ref.get();
     if (!snapshot.exists) throw httpError(404, 'Inquiry not found.');
+    if (snapshot.data().deletedAt) throw httpError(409, 'Restore this inquiry from Bin before updating it.');
     await ref.update({ status, updatedAt: FieldValue.serverTimestamp() });
     const result = { id: ref.id, ...snapshot.data(), status, updatedAt: new Date().toISOString() };
     io.to('agents').emit('inquiry:updated', result);
@@ -51,7 +85,7 @@ module.exports = (io) => {
     const snapshot = await ref.get();
     if (!snapshot.exists) throw httpError(404, 'Inquiry not found.');
     if (!snapshot.data().deletedAt) {
-      await ref.update({ deletedAt: FieldValue.serverTimestamp(), deletedBy: request.user.uid, status: 'deleted' });
+      await ref.update({ deletedAt: FieldValue.serverTimestamp(), deletedBy: request.user.uid, deletedPreviousStatus: snapshot.data().status || 'new', status: 'deleted' });
       await auditLogs.add({ action: 'inquiry.soft_delete', inquiryId: ref.id, actorUid: request.user.uid, createdAt: FieldValue.serverTimestamp() });
       io.to('agents').emit('queue-updated');
     }

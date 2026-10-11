@@ -87,7 +87,8 @@ router.get('/calls', asyncRoute(async (request, response) => {
   const query = typeof request.query.status === 'string'
     ? db.collection('calls').where('status', '==', request.query.status).orderBy('createdAt', 'desc')
     : db.collection('calls').orderBy('createdAt', 'desc');
-  response.json({ calls: docs(await query.limit(limit).get()) });
+  const snapshot = await query.limit(limit).get();
+  response.json({ calls: docs({ docs: snapshot.docs.filter((doc) => doc.data().inBin !== true && !doc.data().deletedAt) }) });
 }));
 
 router.get('/conversations', asyncRoute(async (request, response) => {

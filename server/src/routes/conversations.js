@@ -15,6 +15,14 @@ function canManageConversation(conversation, user) {
   return user.role === 'admin' || (user.role === 'agent' && (conversation.status === 'waiting' || conversation.agentUid === user.uid));
 }
 
+function canManageDeletedMessage(conversation, user, message) {
+  return user.role === 'admin' || canManageConversation(conversation, user) || (user.role === 'agent' && message.deletedBy === user.uid);
+}
+
+function deletedMessageArchiveId(conversationId, messageId) {
+  return crypto.createHash('sha256').update(`${conversationId}\0${messageId}`).digest('hex');
+}
+
 function publicMessage(doc) {
   const value = doc.data();
   return { id: doc.id, ...value, text: value.deletedAt ? 'This message was deleted.' : value.text,
@@ -101,7 +109,7 @@ module.exports = (io) => {
     const messages = await Promise.all(snapshot.docs.map(async (doc) => {
       const data = doc.data();
       const conversation = await conversations.doc(data.conversationId).get();
-      if (!conversation.exists || !canManageConversation(conversation.data(), request.user)) return null;
+      if (!conversation.exists || !canManageDeletedMessage(conversation.data(), request.user, data)) return null;
       const iso = (date) => date?.toDate ? date.toDate().toISOString() : null;
       return { id: doc.id, ...data, createdAt: iso(data.createdAt), deletedAt: iso(data.deletedAt) };
     }));
@@ -114,7 +122,7 @@ module.exports = (io) => {
     if (!archive.exists) throw httpError(404, 'Deleted message not found in Bin.');
     const data = archive.data();
     const { ref: conversationRef, value } = await readConversation(data.conversationId);
-    if (!canManageConversation(value, request.user)) throw httpError(403, 'You cannot manage this conversation.');
+    if (!canManageDeletedMessage(value, request.user, data)) throw httpError(403, 'You cannot manage this deleted message.');
     const messageRef = conversationRef.collection('messages').doc(data.messageId);
     const messageSnapshot = await messageRef.get();
     if (!messageSnapshot.exists) throw httpError(404, 'Original message not found.');
@@ -137,7 +145,7 @@ module.exports = (io) => {
     if (!archive.exists) throw httpError(404, 'Deleted message not found in Bin.');
     const data = archive.data();
     const { ref: conversationRef, value } = await readConversation(data.conversationId);
-    if (!canManageConversation(value, request.user)) throw httpError(403, 'You cannot manage this conversation.');
+    if (!canManageDeletedMessage(value, request.user, data)) throw httpError(403, 'You cannot manage this deleted message.');
     await conversationRef.collection('messages').doc(data.messageId).delete();
     await archiveRef.delete();
     io.to(`conversation:${data.conversationId}`).emit('chat-message-hidden', { id: data.messageId });
@@ -168,7 +176,7 @@ module.exports = (io) => {
     if (!messageSnapshot.exists) throw httpError(404, 'Message not found.');
     if (messageSnapshot.data().deletedAt) return response.json({ deleted: true, id: messageRef.id });
     const original = messageSnapshot.data();
-    await deletedMessages.doc(messageRef.id).set({
+    await deletedMessages.doc(deletedMessageArchiveId(conversationRef.id, messageRef.id)).set({
       messageId: messageRef.id, conversationId: conversationRef.id, customerUid: value.customerUid || null,
       customerEmail: value.customerEmail || null, senderUid: original.senderUid || null, senderRole: original.senderRole || 'customer',
       text: original.text || '', createdAt: original.createdAt || null, deletedAt: FieldValue.serverTimestamp(), deletedBy: request.user.uid,
