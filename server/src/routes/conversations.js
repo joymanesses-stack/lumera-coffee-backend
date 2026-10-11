@@ -150,7 +150,14 @@ module.exports = (io) => {
 
   router.delete('/bin/messages/:messageId', authMiddleware, requireRole('agent', 'admin'), asyncRoute(async (request, response) => {
     const archive = await findDeletedMessageArchive(request.params.messageId);
-    if (!archive) throw httpError(404, 'Deleted message not found in Bin.');
+    // DELETE is safe to retry: a second request can arrive after the first one
+    // already removed the archive (for example, after a client timeout).
+    if (!archive) return response.json({
+      deleted: true,
+      alreadyDeleted: true,
+      id: request.params.messageId,
+      message: 'Message already deleted.',
+    });
     const archiveRef = archive.ref;
     const data = archive.data();
     const { ref: conversationRef, value } = await readConversation(data.conversationId);
