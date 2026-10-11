@@ -71,18 +71,19 @@ const agentDashboard = asyncRoute(async (_request, response) => {
   const callQueue = allCalls.filter((call) => call.status === 'ringing' && !expiredIds.has(call.id));
   const callHistory = await addCallerDetails(allCalls.filter((call) => ['missed', 'declined', 'ended'].includes(call.status)));
   const chats = [...items(waitingChats), ...items(activeChats)].sort((left, right) => (Date.parse(right.createdAt || '') || 0) - (Date.parse(left.createdAt || '') || 0)).slice(0, 30);
-  response.json({ calls: callQueue, callHistory, conversations: chats.map((chat) => ({ ...chat, userUid: chat.customerUid, lastMessage: chat.lastMessagePreview || '' })), inquiries: items(inquiryList).filter((inquiry) => !inquiry.deletedAt) });
+  response.json({ calls: callQueue, callHistory, conversations: chats.map((chat) => ({ ...chat, userUid: chat.customerUid, lastMessage: chat.lastMessagePreview || '' })), inquiries: items(inquiryList).filter((inquiry) => !inquiry.deletedAt).filter((inquiry) => !inquiry.assignedAgentUid || inquiry.assignedAgentUid === _request.user.uid) });
 });
 router.get('/agent', authMiddleware, requireRole('agent'), agentDashboard);
 router.get('/dashboard', authMiddleware, requireRole('agent'), agentDashboard);
 
 router.get('/admin', authMiddleware, requireRole('admin'), asyncRoute(async (_request, response) => {
-  const [userCount, agentCount, callCount, ringingCount, conversationCount, waitingChatCount, inquiryCount, recentCalls, recentConversations] = await Promise.all([
+  const [userCount, agentCount, callCount, ringingCount, conversationCount, waitingChatCount, inquiryCount, openInquiryCount, recentCalls, recentConversations] = await Promise.all([
     db.collection('backendUsers').count().get(), db.collection('backendAgents').count().get(),
     calls.count().get(), calls.where('status', '==', 'ringing').count().get(),
     conversations.count().get(), conversations.where('status', '==', 'waiting').count().get(),
-    inquiries.count().get(), calls.orderBy('createdAt', 'desc').limit(10).get(),
-    conversations.orderBy('createdAt', 'desc').limit(10).get(),
+    inquiries.count().get(), inquiries.where('status', 'in', ['new', 'in_progress']).count().get(),
+    calls.orderBy('createdAt', 'desc').limit(10).get(),
+    conversations.orderBy('createdAt', 'desc').limit(100).get(),
   ]);
   const [users, agents, admins, allCalls, allInquiries] = await Promise.all([
     db.collection('backendUsers').limit(200).get(),
@@ -95,9 +96,9 @@ router.get('/admin', authMiddleware, requireRole('admin'), asyncRoute(async (_re
     users: [...items(users), ...items(agents), ...items(admins)].map((user) => ({ ...user, uid: user.uid || user.id, displayName: user.displayName || user.email || '' })),
     calls: items({ docs: allCalls.docs.filter((doc) => doc.data().inBin !== true && !doc.data().deletedAt) }),
     inquiries: items({ docs: allInquiries.docs.filter((doc) => !doc.data().deletedAt) }),
-    metrics: { users: userCount.data().count, agents: agentCount.data().count, calls: callCount.data().count, ringingCalls: ringingCount.data().count, conversations: conversationCount.data().count, waitingChats: waitingChatCount.data().count, inquiries: inquiryCount.data().count },
+    metrics: { users: userCount.data().count, agents: agentCount.data().count, calls: callCount.data().count, ringingCalls: ringingCount.data().count, conversations: conversationCount.data().count, waitingChats: waitingChatCount.data().count, inquiries: inquiryCount.data().count, openInquiries: openInquiryCount.data().count },
     recentCalls: items({ docs: recentCalls.docs.filter((doc) => doc.data().inBin !== true && !doc.data().deletedAt) }),
-    recentConversations: items(recentConversations),
+    recentConversations: items(recentConversations).filter((conversation) => !conversation.deletedAt),
   });
 }));
 
@@ -117,7 +118,7 @@ router.get('/', authMiddleware, asyncRoute(async (request, response) => {
       inquiries.orderBy('createdAt', 'desc').limit(30).get(),
     ]);
     const chats = [...items(waitingChats), ...items(activeChats)].sort((left, right) => (right.createdAt?.toMillis?.() || 0) - (left.createdAt?.toMillis?.() || 0)).slice(0, 30);
-    return response.json({ calls: items({ docs: callQueue.docs.filter((doc) => doc.data().inBin !== true && !doc.data().deletedAt) }), conversations: chats, inquiries: items(inquiryList).filter((inquiry) => !inquiry.deletedAt) });
+    return response.json({ calls: items({ docs: callQueue.docs.filter((doc) => doc.data().inBin !== true && !doc.data().deletedAt) }), conversations: chats, inquiries: items(inquiryList).filter((inquiry) => !inquiry.deletedAt).filter((inquiry) => !inquiry.assignedAgentUid || inquiry.assignedAgentUid === request.user.uid) });
   }
   const [userCount, agentCount, callCount, ringingCount, conversationCount, waitingChatCount, inquiryCount] = await Promise.all([
     db.collection('backendUsers').count().get(), db.collection('backendAgents').count().get(), calls.count().get(),

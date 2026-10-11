@@ -125,6 +125,47 @@ module.exports = (io) => {
     response.json({ messages: messages.filter(Boolean) });
   }));
 
+  router.get('/bin/conversations', authMiddleware, requireRole('admin'), asyncRoute(async (_request, response) => {
+    const snapshot = await conversations.where('deletedAt', '!=', null).orderBy('deletedAt', 'desc').limit(100).get();
+    response.json({ conversations: snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() })) });
+  }));
+
+  router.post('/bin/conversations/:conversationId/restore', authMiddleware, requireRole('admin'), asyncRoute(async (request, response) => {
+    const ref = conversations.doc(request.params.conversationId);
+    const snapshot = await ref.get();
+    if (!snapshot.exists || !snapshot.data().deletedAt) throw httpError(404, 'Deleted conversation not found in Bin.');
+    const value = snapshot.data();
+    const status = value.deletedPreviousStatus || 'waiting';
+    await ref.update({
+      status, deletedAt: FieldValue.delete(), deletedBy: FieldValue.delete(), deletedPreviousStatus: FieldValue.delete(),
+      restoredAt: FieldValue.serverTimestamp(), restoredBy: request.user.uid,
+    });
+    await auditLogs.add({ action: 'conversation.restore', conversationId: ref.id, actorUid: request.user.uid, createdAt: FieldValue.serverTimestamp() });
+    const { deletedAt, deletedBy, deletedPreviousStatus, ...restoredFields } = value;
+    const restored = { id: ref.id, ...restoredFields, status, deletedAt: null };
+    io.to(`conversation:${ref.id}`).emit('conversation:updated', restored);
+    io.to('agents').emit('conversation:updated', restored);
+    io.to('agents').emit('queue-updated');
+    response.json({ restored: true, conversation: restored });
+  }));
+
+  router.delete('/bin/conversations/:conversationId', authMiddleware, requireRole('admin'), asyncRoute(async (request, response) => {
+    const ref = conversations.doc(request.params.conversationId);
+    const snapshot = await ref.get();
+    if (!snapshot.exists || !snapshot.data().deletedAt) throw httpError(404, 'Deleted conversation not found in Bin.');
+    const archivedMessages = await deletedMessages.where('conversationId', '==', ref.id).get();
+    for (let offset = 0; offset < archivedMessages.docs.length; offset += 400) {
+      const batch = db.batch();
+      archivedMessages.docs.slice(offset, offset + 400).forEach((doc) => batch.delete(doc.ref));
+      await batch.commit();
+    }
+    await db.recursiveDelete(ref);
+    await auditLogs.add({ action: 'conversation.permanent_delete', conversationId: ref.id, customerUid: snapshot.data().customerUid || null, actorUid: request.user.uid, createdAt: FieldValue.serverTimestamp() });
+    io.to(`conversation:${ref.id}`).emit('conversation:deleted', { id: ref.id });
+    io.to('agents').emit('queue-updated');
+    response.json({ deleted: true, id: ref.id });
+  }));
+
   router.post('/bin/messages/:messageId/restore', authMiddleware, requireRole('agent', 'admin'), asyncRoute(async (request, response) => {
     const archive = await findDeletedMessageArchive(request.params.messageId);
     if (!archive) throw httpError(404, 'Deleted message not found in Bin.');

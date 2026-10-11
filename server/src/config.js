@@ -18,6 +18,7 @@ const config = {
     ...(process.env.ALLOWED_ORIGINS || '').split(',').map((value) => value.trim()).filter(Boolean),
   ])],
   adminEmails: (process.env.ADMIN_EMAILS || process.env.BOOTSTRAP_ADMIN_EMAIL || '').split(',').map((value) => value.trim().toLowerCase()).filter(Boolean),
+  adminPassword: process.env.ADMIN_PASSWORD || '',
   stunUrls: (process.env.STUN_URLS || 'stun:stun.l.google.com:19302').split(',').map((value) => value.trim()).filter(Boolean),
   turnUrls: (process.env.TURN_URLS || '').split(',').map((value) => value.trim()).filter(Boolean),
   firebaseProjectId: process.env.FIREBASE_PROJECT_ID || process.env.VITE_FIREBASE_PROJECT_ID || process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT || '',

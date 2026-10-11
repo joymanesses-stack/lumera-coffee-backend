@@ -1,11 +1,34 @@
 'use strict';
 
 const express = require('express');
-const { db, firebaseAuth, FieldValue } = require('../config');
+const crypto = require('node:crypto');
+const { db, firebaseAuth, FieldValue, config } = require('../config');
 const { httpError, asyncRoute } = require('../lib/errors');
 const { users, agents, admins, authMiddleware, normalizeEmail, emailId, validPassword, hashPassword, passwordMatches, issueSession, publicUser, isConfiguredAdmin } = require('../lib/security');
 
 const router = express.Router();
+
+function matchesConfiguredPassword(candidate, expected) {
+  if (typeof candidate !== 'string' || typeof expected !== 'string' || !expected) return false;
+  const actual = Buffer.from(candidate);
+  const configured = Buffer.from(expected);
+  return actual.length === configured.length && crypto.timingSafeEqual(actual, configured);
+}
+
+router.post('/admin-login', asyncRoute(async (request, response) => {
+  const email = normalizeEmail(request.body?.email);
+  const password = request.body?.password;
+  if (!config.adminEmails.includes(email) || !matchesConfiguredPassword(password, config.adminPassword)) {
+    throw httpError(401, 'Email or password is incorrect.');
+  }
+
+  const uid = `local_${emailId(email)}`;
+  await admins.doc(uid).set({
+    uid, email, role: 'admin', active: true, provider: 'environment',
+    lastLoginAt: FieldValue.serverTimestamp(),
+  }, { merge: true });
+  response.json(issueSession({ uid, email, role: 'admin' }));
+}));
 
 router.post('/register', asyncRoute(async (request, response) => {
   const email = normalizeEmail(request.body?.email);

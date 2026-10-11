@@ -61,18 +61,34 @@ module.exports = (io) => {
   router.get('/', authMiddleware, requireRole('agent', 'admin'), asyncRoute(async (request, response) => {
     const limit = Math.min(Math.max(Number(request.query.limit || 50), 1), 100);
     const snapshot = await inquiries.orderBy('createdAt', 'desc').limit(limit).get();
-    response.json({ inquiries: snapshot.docs.filter((doc) => !doc.data().deletedAt).map((doc) => ({ id: doc.id, ...doc.data() })) });
+    const result = snapshot.docs.filter((doc) => !doc.data().deletedAt).map((doc) => ({ id: doc.id, ...doc.data() }))
+      .filter((inquiry) => request.user.role !== 'agent' || !inquiry.assignedAgentUid || inquiry.assignedAgentUid === request.user.uid);
+    response.json({ inquiries: result });
   }));
 
   const updateInquiry = asyncRoute(async (request, response) => {
     const status = request.body?.status;
     if (!['new', 'in_progress', 'contacted', 'closed'].includes(status)) throw httpError(400, 'Invalid inquiry status.');
+    if (Object.prototype.hasOwnProperty.call(request.body || {}, 'assignedAgentUid') && request.user.role !== 'admin') {
+      throw httpError(403, 'Only an administrator can assign an inquiry.');
+    }
     const ref = inquiries.doc(request.params.inquiryId);
     const snapshot = await ref.get();
     if (!snapshot.exists) throw httpError(404, 'Inquiry not found.');
     if (snapshot.data().deletedAt) throw httpError(409, 'Restore this inquiry from Bin before updating it.');
-    await ref.update({ status, updatedAt: FieldValue.serverTimestamp() });
-    const result = { id: ref.id, ...snapshot.data(), status, updatedAt: new Date().toISOString() };
+    const update = { status, updatedAt: FieldValue.serverTimestamp() };
+    let assignedAgentUid = snapshot.data().assignedAgentUid || null;
+    if (Object.prototype.hasOwnProperty.call(request.body || {}, 'assignedAgentUid')) {
+      assignedAgentUid = typeof request.body.assignedAgentUid === 'string' && request.body.assignedAgentUid.trim()
+        ? request.body.assignedAgentUid.trim() : null;
+      if (assignedAgentUid) {
+        const agent = await db.collection('backendAgents').doc(assignedAgentUid).get();
+        if (!agent.exists || agent.data().active !== true) throw httpError(400, 'Choose an active agent.');
+      }
+      update.assignedAgentUid = assignedAgentUid || FieldValue.delete();
+    }
+    await ref.update(update);
+    const result = { id: ref.id, ...snapshot.data(), status, assignedAgentUid, updatedAt: new Date().toISOString() };
     io.to('agents').emit('inquiry:updated', result);
     io.to('agents').emit('queue-updated');
     response.json({ inquiry: result });

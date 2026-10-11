@@ -1,13 +1,18 @@
 'use strict';
 
 const express = require('express');
-const { FieldValue, db } = require('../config');
+const { FieldValue, db, firebaseAuth } = require('../config');
 const { httpError, asyncRoute } = require('../lib/errors');
 const { authMiddleware, requireRole, agents, admins, users, hashPassword, normalizeEmail, emailId, validPassword, isConfiguredAdmin } = require('../lib/security');
 
 const router = express.Router();
 const docs = (snapshot) => snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
 const hidePassword = ({ password, ...record }) => record;
+const dateValue = (value) => value?.toDate ? value.toDate().toISOString() : value?.toISOString ? value.toISOString() : value || null;
+const publicRecord = (doc) => {
+  const { password, ...record } = doc.data();
+  return { id: doc.id, ...record, createdAt: dateValue(record.createdAt), updatedAt: dateValue(record.updatedAt) };
+};
 
 module.exports = (io) => {
 router.use(authMiddleware, requireRole('admin'));
@@ -46,10 +51,110 @@ router.patch('/agents/:agentId', asyncRoute(async (request, response) => {
   response.json({ agent: hidePassword({ id, ...snapshot.data(), active: request.body.active }) });
 }));
 
+router.delete('/agents/:agentId', asyncRoute(async (request, response) => {
+  const id = request.params.agentId;
+  const ref = agents.doc(id);
+  const snapshot = await ref.get();
+  if (!snapshot.exists) throw httpError(404, 'Agent not found.');
+  if (snapshot.data().deletedAt) return response.json({ deleted: true, id, alreadyInBin: true });
+  const [assignedInquiries, activeConversations, activeCalls] = await Promise.all([
+    db.collection('inquiries').where('assignedAgentUid', '==', id).get(),
+    db.collection('conversations').where('agentUid', '==', id).get(),
+    db.collection('calls').where('agentUid', '==', id).get(),
+  ]);
+  if (assignedInquiries.docs.some((doc) => !doc.data().deletedAt && doc.data().status !== 'closed')
+    || activeConversations.docs.some((doc) => doc.data().status === 'active')
+    || activeCalls.docs.some((doc) => doc.data().status === 'accepted')) {
+    throw httpError(409, 'Reassign this agent’s open inquiries and finish active calls or chats before moving the account to Bin.');
+  }
+  await ref.update({ active: false, deletedAt: FieldValue.serverTimestamp(), deletedBy: request.user.uid, deletedPreviousActive: snapshot.data().active !== false });
+  await db.collection('auditLogs').add({ action: 'agent.soft_delete', agentUid: id, actorUid: request.user.uid, createdAt: FieldValue.serverTimestamp() });
+  response.json({ deleted: true, id });
+}));
+
+router.get('/bin/agents', asyncRoute(async (_request, response) => {
+  const snapshot = await agents.where('deletedAt', '!=', null).orderBy('deletedAt', 'desc').limit(100).get();
+  response.json({ agents: docs(snapshot).map(hidePassword) });
+}));
+
+router.post('/bin/agents/:agentId/restore', asyncRoute(async (request, response) => {
+  const ref = agents.doc(request.params.agentId);
+  const snapshot = await ref.get();
+  if (!snapshot.exists || !snapshot.data().deletedAt) throw httpError(404, 'Deleted agent not found in Bin.');
+  const value = snapshot.data();
+  const active = value.deletedPreviousActive !== false;
+  await ref.update({ active, deletedAt: FieldValue.delete(), deletedBy: FieldValue.delete(), deletedPreviousActive: FieldValue.delete(), restoredAt: FieldValue.serverTimestamp(), restoredBy: request.user.uid });
+  await db.collection('auditLogs').add({ action: 'agent.restore', agentUid: ref.id, actorUid: request.user.uid, createdAt: FieldValue.serverTimestamp() });
+  response.json({ restored: true, agent: hidePassword({ id: ref.id, ...value, active, deletedAt: null }) });
+}));
+
+router.delete('/bin/agents/:agentId', asyncRoute(async (request, response) => {
+  const ref = agents.doc(request.params.agentId);
+  const snapshot = await ref.get();
+  if (!snapshot.exists || !snapshot.data().deletedAt) throw httpError(404, 'Deleted agent not found in Bin.');
+  const [assignedInquiries, activeConversations, activeCalls] = await Promise.all([
+    db.collection('inquiries').where('assignedAgentUid', '==', ref.id).get(),
+    db.collection('conversations').where('agentUid', '==', ref.id).get(),
+    db.collection('calls').where('agentUid', '==', ref.id).get(),
+  ]);
+  if (assignedInquiries.docs.some((doc) => !doc.data().deletedAt && doc.data().status !== 'closed')
+    || activeConversations.docs.some((doc) => doc.data().status === 'active')
+    || activeCalls.docs.some((doc) => doc.data().status === 'accepted')) {
+    throw httpError(409, 'Reassign this agent’s open inquiries and finish active calls or chats before permanent deletion.');
+  }
+  try { await firebaseAuth.deleteUser(ref.id); }
+  catch (error) { if (error.code !== 'auth/user-not-found') throw error; }
+  await ref.delete();
+  await db.collection('auditLogs').add({ action: 'agent.permanent_delete', agentUid: ref.id, actorUid: request.user.uid, createdAt: FieldValue.serverTimestamp() });
+  response.json({ deleted: true, id: ref.id });
+}));
+
 router.get('/users', asyncRoute(async (request, response) => {
   const limit = Math.min(Math.max(Number(request.query.limit || 50), 1), 200);
   const snapshot = await users.limit(limit).get();
   response.json({ users: docs(snapshot).map(({ password, ...user }) => user) });
+}));
+
+router.get('/users/:userId', asyncRoute(async (request, response) => {
+  const uid = request.params.userId;
+  const [userSnapshot, agentSnapshot, adminSnapshot] = await Promise.all([
+    users.doc(uid).get(), agents.doc(uid).get(), admins.doc(uid).get(),
+  ]);
+  const profileSnapshot = userSnapshot.exists ? userSnapshot : agentSnapshot.exists ? agentSnapshot : adminSnapshot;
+  let firebaseUser = null;
+  try { firebaseUser = await firebaseAuth.getUser(uid); }
+  catch (error) { if (error.code !== 'auth/user-not-found') throw error; }
+  if (!profileSnapshot.exists && !firebaseUser) throw httpError(404, 'User not found.');
+
+  const profile = profileSnapshot.exists ? publicRecord(profileSnapshot) : {};
+  const role = profile.role || (firebaseUser?.customClaims?.admin ? 'admin' : firebaseUser?.customClaims?.agent ? 'agent' : 'customer');
+  const email = firebaseUser?.email || profile.email || null;
+  const [callerCalls, agentCalls, assignedInquiries, emailInquiries, customerChats, legacyCustomerChats, agentChats] = await Promise.all([
+    db.collection('calls').where('callerUid', '==', uid).limit(25).get(),
+    db.collection('calls').where('agentUid', '==', uid).limit(25).get(),
+    db.collection('inquiries').where('assignedAgentUid', '==', uid).limit(25).get(),
+    email ? db.collection('inquiries').where('email', '==', email).limit(25).get() : Promise.resolve({ docs: [] }),
+    db.collection('conversations').where('customerUid', '==', uid).limit(25).get(),
+    db.collection('conversations').where('userUid', '==', uid).limit(25).get(),
+    db.collection('conversations').where('agentUid', '==', uid).limit(25).get(),
+  ]);
+  const uniqueRecords = (...snapshots) => [...new Map(snapshots.flatMap((snapshot) => snapshot.docs).map((doc) => [doc.id, publicRecord(doc)])).values()];
+  const newestFirst = (records) => records.sort((left, right) => (Date.parse(dateValue(right.createdAt)) || 0) - (Date.parse(dateValue(left.createdAt)) || 0));
+  response.json({
+    user: {
+      uid, email, displayName: firebaseUser?.displayName || profile.displayName || email || uid,
+      phoneNumber: firebaseUser?.phoneNumber || profile.phoneNumber || profile.phone || null,
+      emailVerified: firebaseUser?.emailVerified ?? null,
+      disabled: firebaseUser?.disabled ?? profile.active === false,
+      role, provider: firebaseUser?.providerData?.map((item) => item.providerId) || profile.provider || null,
+      createdAt: firebaseUser?.metadata?.creationTime || dateValue(profile.createdAt),
+      lastSignInAt: firebaseUser?.metadata?.lastSignInTime || null,
+      updatedAt: dateValue(profile.updatedAt),
+    },
+    calls: newestFirst(uniqueRecords(callerCalls, agentCalls)).slice(0, 25),
+    inquiries: newestFirst(uniqueRecords(assignedInquiries, emailInquiries)).slice(0, 25),
+    conversations: newestFirst(uniqueRecords(customerChats, legacyCustomerChats, agentChats)).slice(0, 25),
+  });
 }));
 
 router.get('/audit-logs', asyncRoute(async (request, response) => {
